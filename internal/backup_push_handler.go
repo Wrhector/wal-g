@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/Showmax/go-fqdn"
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 	"github.com/wal-g/storages/storage"
@@ -85,8 +88,15 @@ func createAndPushBackup(
 		previousBackupSentinelDto.Files, forceIncremental, viper.GetInt64(TarSizeThresholdSetting))
 
 	var meta ExtendedMetadataDto
+	var err error
 	meta.StartTime = utility.TimeNowCrossPlatformUTC()
-	meta.Hostname, _ = os.Hostname()
+	meta.Hostname, err = fqdn.FqdnHostname()
+	if err != nil {
+		meta.Hostname, _ = os.Hostname()
+	} else {
+		parts := strings.Split(meta.Hostname,".")
+		meta.Hostname = strings.Join(parts[:int(math.Min(2, float64(len(parts))))],".")
+	}
 	meta.IsPermanent = isPermanent
 
 	// Connect to postgres and start/finish a nonexclusive backup.

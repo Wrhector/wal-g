@@ -7,6 +7,7 @@ require (
 	github.com/DataDog/zstd v1.4.4
 	github.com/Microsoft/go-winio v0.4.14 // indirect
 	github.com/RoaringBitmap/roaring v0.4.21
+	github.com/Showmax/go-fqdn v1.0.0
 	github.com/aws/aws-sdk-go v1.34.3
 	github.com/cenkalti/backoff v2.2.1+incompatible
 	github.com/cyberdelia/lzo v0.0.0-20171006181345-d85071271a6f
