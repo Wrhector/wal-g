@@ -7,7 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
+	"sort"
+	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/wal-g/storages/fs"
@@ -58,7 +59,7 @@ func (backup *Backup) GetStopSentinelPath() string {
 	return SentinelNameFromBackup(backup.Name)
 }
 
-func (backup *Backup) getMetadataPath() string {
+func (backup *Backup) GetMetadataPath() string {
 	return backup.Name + "/" + utility.MetadataFileName
 }
 
@@ -116,14 +117,16 @@ func (backup *Backup) fetchSentinelData() ([]byte, error) {
 	return sentinelDtoData, nil
 }
 
-func (backup *Backup) fetchMeta() (ExtendedMetadataDto, error) {
+func (backup *Backup) FetchMeta() (ExtendedMetadataDto, error) {
 	extendedMetadataDto := ExtendedMetadataDto{}
-	backupReaderMaker := newStorageReaderMaker(backup.BaseBackupFolder, backup.getMetadataPath())
+	backupReaderMaker := newStorageReaderMaker(backup.BaseBackupFolder, backup.GetMetadataPath())
+
 	backupReader, err := backupReaderMaker.Reader()
 	if err != nil {
 		return extendedMetadataDto, err
 	}
 	extendedMetadataDtoData, err := ioutil.ReadAll(backupReader)
+
 	if err != nil {
 		return extendedMetadataDto, errors.Wrap(err, "failed to fetch metadata")
 	}
@@ -327,18 +330,105 @@ func shouldUnwrapTar(tarName string, sentinelDto BackupSentinelDto, filesToUnwra
 }
 
 func GetLastWalFilename(backup *Backup) (string, error) {
-	meta, err := backup.fetchMeta()
+	meta, err := backup.FetchMeta()
 	if err != nil {
 		tracelog.InfoLogger.Print("No meta found.")
 		return "", err
 	}
-	prefixLenght := len(utility.BackupNamePrefix)
-	timelineID64, err := strconv.ParseUint(backup.Name[prefixLenght:prefixLenght+8], hexadecimal, sizeofInt32bits)
+	timelineId, err := ParseTimelineFromBackupName(backup.Name)
 	if err != nil {
 		tracelog.InfoLogger.FatalError(err)
 		return "", err
 	}
-	timelineID := uint32(timelineID64)
 	endWalSegmentNo := newWalSegmentNo(meta.FinishLsn - 1)
-	return endWalSegmentNo.getFilename(timelineID), nil
+	return endWalSegmentNo.getFilename(timelineId), nil
+}
+
+// TODO : unit tests
+func getLatestBackupName(folder storage.Folder) (string, error) {
+	sortTimes, err := GetBackups(folder)
+	if err != nil {
+		return "", err
+	}
+
+	return sortTimes[0].BackupName, nil
+}
+
+func GetBackupSentinelObjects(folder storage.Folder) ([]storage.Object, error) {
+	objects, _, err := folder.GetSubFolder(utility.BaseBackupPath).ListFolder()
+	if err != nil {
+		return nil, err
+	}
+	sentinelObjects := make([]storage.Object, 0, len(objects))
+	for _, object := range objects {
+		if !strings.HasSuffix(object.GetName(), utility.SentinelSuffix) {
+			continue
+		}
+		sentinelObjects = append(sentinelObjects, object)
+	}
+
+	return sentinelObjects, nil
+}
+
+// TODO : unit tests
+// GetBackups receives backup descriptions and sorts them by time
+func GetBackups(folder storage.Folder) (backups []BackupTime, err error) {
+	backups, _, err = GetBackupsAndGarbage(folder)
+	if err != nil {
+		return nil, err
+	}
+
+	count := len(backups)
+	if count == 0 {
+		return nil, NewNoBackupsFoundError()
+	}
+	return
+}
+
+// TODO : unit tests
+func GetBackupsAndGarbage(folder storage.Folder) (backups []BackupTime, garbage []string, err error) {
+	backupObjects, subFolders, err := folder.GetSubFolder(utility.BaseBackupPath).ListFolder()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sortTimes := GetBackupTimeSlices(backupObjects)
+	garbage = getGarbageFromPrefix(subFolders, sortTimes)
+
+	return sortTimes, garbage, nil
+}
+
+// TODO : unit tests
+func GetBackupTimeSlices(backups []storage.Object) []BackupTime {
+	sortTimes := make([]BackupTime, len(backups))
+	for i, object := range backups {
+		key := object.GetName()
+		if !strings.HasSuffix(key, utility.SentinelSuffix) {
+			continue
+		}
+		time := object.GetLastModified()
+		sortTimes[i] = BackupTime{utility.StripBackupName(key), time,
+			utility.StripWalFileName(key)}
+	}
+	sort.Slice(sortTimes, func(i, j int) bool {
+		return sortTimes[i].Time.After(sortTimes[j].Time)
+	})
+	return sortTimes
+}
+
+// TODO : unit tests
+func getGarbageFromPrefix(folders []storage.Folder, nonGarbage []BackupTime) []string {
+	garbage := make([]string, 0)
+	var keyFilter = make(map[string]string)
+	for _, k := range nonGarbage {
+		keyFilter[k.BackupName] = k.BackupName
+	}
+	for _, folder := range folders {
+		backupName := utility.StripPrefixName(folder.GetPath())
+		if _, ok := keyFilter[backupName]; ok {
+			continue
+		}
+		garbage = append(garbage, backupName)
+	}
+	return garbage
 }

@@ -13,14 +13,14 @@ import (
 var ShortDescription = "MySQL backup tool"
 
 // These variables are here only to show current version. They are set in makefile during build process
-var WalgVersion = "devel"
-var GitRevision = "devel"
-var BuildDate = "devel"
+var walgVersion = "devel"
+var gitRevision = "devel"
+var buildDate = "devel"
 
-var Cmd = &cobra.Command{
+var cmd = &cobra.Command{
 	Use:     "mysql",
 	Short:   ShortDescription, // TODO : improve description
-	Version: strings.Join([]string{WalgVersion, GitRevision, BuildDate, "MySQL"}, "\t"),
+	Version: strings.Join([]string{walgVersion, gitRevision, buildDate, "MySQL"}, "\t"),
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		err := internal.AssertRequiredSettingsSet()
 		if err != nil {
@@ -29,8 +29,10 @@ var Cmd = &cobra.Command{
 	},
 }
 
+// Execute adds all child commands to the root command and sets flags appropriately.
+// This is called by main.main().
 func Execute() {
-	if err := Cmd.Execute(); err != nil {
+	if err := cmd.Execute(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
@@ -39,7 +41,7 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(internal.InitConfig, internal.Configure)
 
-	Cmd.PersistentFlags().StringVar(&internal.CfgFile, "config", "", "config file (default is $HOME/.walg.json)")
-	Cmd.InitDefaultVersionFlag()
-	internal.AddConfigFlags(Cmd)
+	cmd.PersistentFlags().StringVar(&internal.CfgFile, "config", "", "config file (default is $HOME/.walg.json)")
+	cmd.InitDefaultVersionFlag()
+	internal.AddConfigFlags(cmd)
 }

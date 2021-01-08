@@ -1,6 +1,8 @@
 package fdb
 
 import (
+	"time"
+
 	"github.com/spf13/cobra"
 	"github.com/wal-g/storages/storage"
 	"github.com/wal-g/tracelog"
@@ -49,42 +51,65 @@ var deleteEverythingCmd = &cobra.Command{
 func runDeleteEverything(cmd *cobra.Command, args []string) {
 	folder, err := internal.ConfigureFolder()
 	tracelog.ErrorLogger.FatalOnError(err)
-	internal.DeleteEverything(folder, confirmed, args)
+
+	deleteHandler, err := newFdbDeleteHandler(folder)
+	tracelog.ErrorLogger.FatalOnError(err)
+
+	deleteHandler.DeleteEverything(confirmed)
 }
 
 func runDeleteBefore(cmd *cobra.Command, args []string) {
 	folder, err := internal.ConfigureFolder()
 	tracelog.ErrorLogger.FatalOnError(err)
 
-	internal.HandleDeleteBefore(folder, args, confirmed, isFullBackup, GetLessFunc(folder))
+	deleteHandler, err := newFdbDeleteHandler(folder)
+	tracelog.ErrorLogger.FatalOnError(err)
+
+	deleteHandler.HandleDeleteBefore(args, confirmed)
 }
 
 func runDeleteRetain(cmd *cobra.Command, args []string) {
 	folder, err := internal.ConfigureFolder()
 	tracelog.ErrorLogger.FatalOnError(err)
 
-	internal.HandleDeleteRetain(folder, args, confirmed, isFullBackup, GetLessFunc(folder))
+	deleteHandler, err := newFdbDeleteHandler(folder)
+	tracelog.ErrorLogger.FatalOnError(err)
+
+	deleteHandler.HandleDeleteRetain(args, confirmed)
 }
 
 func runDeleteRetainAfter(cmd *cobra.Command, args []string) {
 	folder, err := internal.ConfigureFolder()
 	tracelog.ErrorLogger.FatalOnError(err)
 
-	internal.HandleDeletaRetainAfter(folder, args, confirmed, isFullBackup, GetLessFunc(folder))
-}
+	deleteHandler, err := newFdbDeleteHandler(folder)
+	tracelog.ErrorLogger.FatalOnError(err)
 
-func isFullBackup(object storage.Object) bool {
-	return true
+	deleteHandler.HandleDeleteRetainAfter(args, confirmed)
 }
 
 func init() {
-	Cmd.AddCommand(deleteCmd)
+	cmd.AddCommand(deleteCmd)
 	deleteRetainCmd.Flags().StringP("after", "a", "", "Set the time after which retain backups")
 	deleteCmd.AddCommand(deleteBeforeCmd, deleteRetainCmd, deleteEverythingCmd)
 	deleteCmd.PersistentFlags().BoolVar(&confirmed, internal.ConfirmFlag, false, "Confirms backup deletion")
 }
 
-func GetLessFunc(folder storage.Folder) func(object1, object2 storage.Object) bool {
+func newFdbDeleteHandler(folder storage.Folder) (*internal.DeleteHandler, error) {
+	backups, err := internal.GetBackupSentinelObjects(folder)
+	if err != nil {
+		return nil, err
+	}
+
+	backupObjects := make([]internal.BackupObject, 0, len(backups))
+	for _, object := range backups {
+		backupObjects = append(backupObjects, FdbBackupObject{object})
+	}
+
+	return internal.NewDeleteHandler(folder, backupObjects, makeLessFunc()), nil
+}
+
+func makeLessFunc() func(object1, object2 storage.Object) bool {
 	return func(object1, object2 storage.Object) bool {
 		time1, ok1 := utility.TryFetchTimeRFC3999(object1.GetName())
 		time2, ok2 := utility.TryFetchTimeRFC3999(object2.GetName())
@@ -93,4 +118,16 @@ func GetLessFunc(folder storage.Folder) func(object1, object2 storage.Object) bo
 		}
 		return time1 < time2
 	}
+}
+
+type FdbBackupObject struct {
+	storage.Object
+}
+
+func (o FdbBackupObject) IsFullBackup() bool {
+	return true
+}
+
+func (o FdbBackupObject) GetBackupTime() time.Time {
+	return o.Object.GetLastModified()
 }

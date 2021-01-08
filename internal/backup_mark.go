@@ -10,13 +10,16 @@ import (
 	"github.com/wal-g/wal-g/utility"
 )
 
-// MarkBackup marks a backup as permanent or impermanent
+// markBackup marks a backup as permanent or impermanent
 func markBackup(uploader *Uploader, folder storage.Folder, backupName string, toPermanent bool) {
+
 	tracelog.InfoLogger.Printf("Retrieving previous related backups to be marked: toPermanent=%t", toPermanent)
 	metadataToUpload, err := GetMarkedBackupMetadataToUpload(folder, backupName, toPermanent)
+
 	tracelog.ErrorLogger.FatalfOnError("Failed to get previous backups: %v", err)
 	tracelog.InfoLogger.Printf("Retrieved backups to be marked, marking: %v", metadataToUpload)
-	err = uploader.uploadMultiple(metadataToUpload)
+
+	err = uploader.UploadMultiple(metadataToUpload)
 	tracelog.ErrorLogger.FatalfOnError("Failed to mark previous backups: %v", err)
 }
 
@@ -35,7 +38,7 @@ func GetMarkedBackupMetadataToUpload(
 	baseBackupFolder := folder.GetSubFolder(utility.BaseBackupPath)
 
 	backup := NewBackup(baseBackupFolder, backupName)
-	meta, err := backup.fetchMeta()
+	meta, err := backup.FetchMeta()
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +69,7 @@ func getMarkedPermanentBackupMetadata(baseBackupFolder storage.Folder, backupNam
 		return nil, err
 	}
 
-	meta, err := backup.fetchMeta()
+	meta, err := backup.FetchMeta()
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +77,7 @@ func getMarkedPermanentBackupMetadata(baseBackupFolder storage.Folder, backupNam
 	// only return backups that we want to update
 	if !meta.IsPermanent {
 		meta.IsPermanent = true
-		metadataUploadObject, err := getMetadataUploadObject(backup.Name, meta)
+		metadataUploadObject, err := GetMetadataUploadObject(backup.Name, meta)
 		if err != nil {
 			return nil, err
 		}
@@ -104,12 +107,12 @@ func getMarkedImpermanentBackupMetadata(folder storage.Folder, backupName string
 	// retrieve current backup meta
 	backup := NewBackup(baseBackupFolder, backupName)
 
-	meta, err := backup.fetchMeta()
+	meta, err := backup.FetchMeta()
 	if err != nil {
 		return nil, err
 	}
 
-	permanentBackups, _ := getPermanentObjects(folder)
+	permanentBackups, _ := GetPermanentObjects(folder)
 	//  del current backup from
 	delete(permanentBackups, getBackupNumber(backupName))
 
@@ -123,7 +126,7 @@ func getMarkedImpermanentBackupMetadata(folder storage.Folder, backupName string
 	}
 
 	meta.IsPermanent = false
-	metadataUploadObject, err := getMetadataUploadObject(backup.Name, meta)
+	metadataUploadObject, err := GetMetadataUploadObject(backup.Name, meta)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +161,7 @@ func backupHasPermanentInFuture(reverseLinks *map[string][]string, backupName st
 func getGraphFromBaseToIncrement(folder storage.Folder) (map[string][]string, error) {
 	baseBackupFolder := folder.GetSubFolder(utility.BaseBackupPath)
 
-	backups, err := getBackups(folder)
+	backups, err := GetBackups(folder)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +193,7 @@ func getMetadataFromBackup(baseBackupFolder storage.Folder, backupName string) (
 	return *sentinel.IncrementFrom, true, nil
 }
 
-func getMetadataUploadObject(backupName string, meta ExtendedMetadataDto) (UploadObject, error) {
+func GetMetadataUploadObject(backupName string, meta ExtendedMetadataDto) (UploadObject, error) {
 	metaFilePath := storage.JoinPath(backupName, utility.MetadataFileName)
 	dtoBody, err := json.Marshal(meta)
 	if err != nil {
@@ -214,4 +217,57 @@ type BackupHasPermanentBackupInFutureError struct {
 
 func newBackupHasPermanentBackupInFutureError(backupName string) BackupHasPermanentBackupInFutureError {
 	return BackupHasPermanentBackupInFutureError{errors.Errorf("Can't mark backup '%s' as impermanent. There is permanent increment backup.", backupName)}
+}
+
+func GetPermanentObjects(folder storage.Folder) (map[string]bool, map[string]bool) {
+	tracelog.InfoLogger.Println("retrieving permanent objects")
+	backupTimes, err := GetBackups(folder)
+	if err != nil {
+		return map[string]bool{}, map[string]bool{}
+	}
+
+	permanentBackups := map[string]bool{}
+	permanentWals := map[string]bool{}
+	for _, backupTime := range backupTimes {
+		backup, err := GetBackupByName(backupTime.BackupName, utility.BaseBackupPath, folder)
+		if err != nil {
+			tracelog.ErrorLogger.Printf("failed to get backup by name with error %s, ignoring...", err.Error())
+			continue
+		}
+		meta, err := backup.FetchMeta()
+		if err != nil {
+			tracelog.ErrorLogger.Printf("failed to fetch backup meta for backup %s with error %s, ignoring...",
+				backupTime.BackupName, err.Error())
+			continue
+		}
+		if meta.IsPermanent {
+			timelineId, err := ParseTimelineFromBackupName(backup.Name)
+			if err != nil {
+				tracelog.ErrorLogger.Printf("failed to parse backup timeline for backup %s with error %s, ignoring...",
+					backupTime.BackupName, err.Error())
+				continue
+			}
+
+			startWalSegmentNo := newWalSegmentNo(meta.StartLsn - 1)
+			endWalSegmentNo := newWalSegmentNo(meta.FinishLsn - 1)
+			for walSegmentNo := startWalSegmentNo; walSegmentNo <= endWalSegmentNo; walSegmentNo = walSegmentNo.next() {
+				permanentWals[walSegmentNo.getFilename(timelineId)] = true
+			}
+			permanentBackups[backupTime.BackupName[len(utility.BackupNamePrefix):len(utility.BackupNamePrefix)+24]] = true
+		}
+	}
+	return permanentBackups, permanentWals
+}
+
+func IsPermanent(objectName string, permanentBackups, permanentWals map[string]bool) bool {
+	if objectName[:len(utility.WalPath)] == utility.WalPath {
+		wal := objectName[len(utility.WalPath) : len(utility.WalPath)+24]
+		return permanentWals[wal]
+	}
+	if objectName[:len(utility.BaseBackupPath)] == utility.BaseBackupPath {
+		backup := objectName[len(utility.BaseBackupPath)+len(utility.BackupNamePrefix) : len(utility.BaseBackupPath)+len(utility.BackupNamePrefix)+24]
+		return permanentBackups[backup]
+	}
+	// should not reach here, default to false
+	return false
 }

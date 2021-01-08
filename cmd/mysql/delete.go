@@ -43,41 +43,51 @@ var deleteEverythingCmd = &cobra.Command{
 	Run:       runDeleteEverything,
 }
 
+type DeleteHandler struct {
+	*internal.DeleteHandler
+	permanentObjects map[string]bool
+}
+
 func runDeleteEverything(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
+	deleteHandler, err := NewMySqlDeleteHandler()
 	tracelog.ErrorLogger.FatalOnError(err)
-	internal.DeleteEverything(folder, confirmed, args)
+
+	if p := deleteHandler.permanentObjects; len(p) > 0 {
+		tracelog.InfoLogger.Fatalf("found permanent objects %s\n", strings.Join(func() []string {
+			ret := make([]string, 0)
+
+			for e := range p {
+				ret = append(ret, e)
+			}
+
+			return ret
+		}(), ","))
+	}
+
+	deleteHandler.DeleteEverything(confirmed)
 }
 
 func runDeleteBefore(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
+	deleteHandler, err := NewMySqlDeleteHandler()
 	tracelog.ErrorLogger.FatalOnError(err)
-	isFullBackup := func(object storage.Object) bool {
-		return IsFullBackup(folder, object)
-	}
-	internal.HandleDeleteBefore(folder, args, confirmed, isFullBackup, GetLessFunc(folder))
+
+	deleteHandler.HandleDeleteBefore(args, confirmed)
 }
 
 func runDeleteRetain(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
+	deleteHandler, err := NewMySqlDeleteHandler()
 	tracelog.ErrorLogger.FatalOnError(err)
-	isFullBackup := func(object storage.Object) bool {
-		return IsFullBackup(folder, object)
-	}
-	internal.HandleDeleteRetain(folder, args, confirmed, isFullBackup, GetLessFunc(folder))
+
+	deleteHandler.HandleDeleteRetain(args, confirmed)
 }
 
 func init() {
-	Cmd.AddCommand(deleteCmd)
+	cmd.AddCommand(deleteCmd)
 	deleteCmd.AddCommand(deleteBeforeCmd, deleteRetainCmd, deleteEverythingCmd)
 	deleteCmd.PersistentFlags().BoolVar(&confirmed, internal.ConfirmFlag, false, "Confirms backup deletion")
 }
 
-func IsFullBackup(folder storage.Folder, object storage.Object) bool {
-	return true
-}
-
-func GetLessFunc(folder storage.Folder) func(object1, object2 storage.Object) bool {
+func makeLessFunc(folder storage.Folder) func(object1, object2 storage.Object) bool {
 	return func(object1, object2 storage.Object) bool {
 		time1, ok := utility.TryFetchTimeRFC3999(object1.GetName())
 		if !ok {
@@ -119,4 +129,67 @@ func tryFetchBinlogName(folder storage.Folder, object storage.Object) (string, b
 		return "", false
 	}
 	return sentinel.BinLogStart, true
+}
+
+func permanentObjects(folder storage.Folder) map[string]bool {
+	tracelog.InfoLogger.Println("retrieving permanent objects")
+	backupTimes, err := internal.GetBackups(folder)
+	if err != nil {
+		return map[string]bool{}
+	}
+
+	permanentBackups := map[string]bool{}
+	for _, backupTime := range backupTimes {
+		backup, err := internal.GetBackupByName(backupTime.BackupName, utility.BaseBackupPath, folder)
+		if err != nil {
+			tracelog.ErrorLogger.Printf("failed to get backup by name with error %s, ignoring...", err.Error())
+			continue
+		}
+		meta, err := backup.FetchMeta()
+		if err != nil {
+			tracelog.ErrorLogger.Printf("failed to fetch backup meta for backup %s with error %s, ignoring...",
+				backupTime.BackupName, err.Error())
+			continue
+		}
+		if meta.IsPermanent {
+			permanentBackups[backupTime.BackupName] = true
+		}
+	}
+	return permanentBackups
+}
+
+func IsPermanent(objectName string, permanentBackups map[string]bool) bool {
+	if objectName[:len(utility.BaseBackupPath)] == utility.BaseBackupPath {
+		backup := objectName[len(utility.BaseBackupPath) : len(utility.BaseBackupPath)+23]
+		return permanentBackups[backup]
+	}
+	// impermanent backup or binlogs
+	return false
+}
+
+func NewMySqlDeleteHandler() (*DeleteHandler, error) {
+	folder, err := internal.ConfigureFolder()
+	tracelog.ErrorLogger.FatalOnError(err)
+
+	backups, err := internal.GetBackupSentinelObjects(folder)
+	if err != nil {
+		return nil, err
+	}
+
+	backupObjects := make([]internal.BackupObject, 0, len(backups))
+	for _, object := range backups {
+		b := mysql.BackupObject{Object: object}
+		backupObjects = append(backupObjects, b)
+	}
+
+	permanentBackups := permanentObjects(folder)
+
+	return &DeleteHandler{
+		DeleteHandler: internal.NewDeleteHandler(folder, backupObjects, makeLessFunc(folder),
+			internal.IsPermanentFunc(func(object storage.Object) bool {
+				return IsPermanent(object.GetName(), permanentBackups)
+			}),
+		),
+		permanentObjects: permanentBackups,
+	}, nil
 }

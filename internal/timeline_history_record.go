@@ -13,10 +13,12 @@ import (
 	"github.com/wal-g/tracelog"
 )
 
-var walHistoryRecordRegexp *regexp.Regexp
+// regexp for .history file record. For more details, see
+// https://doxygen.postgresql.org/backend_2access_2transam_2timeline_8c_source.html
+var timelineHistoryRecordRegexp *regexp.Regexp
 
 func init() {
-	walHistoryRecordRegexp = regexp.MustCompile("^(\\d+)\\t(.+)\\t(.+)$")
+	timelineHistoryRecordRegexp = regexp.MustCompile("^(\\d+)\\t(.+)\\t(.+)$")
 }
 
 type HistoryFileNotFoundError struct {
@@ -43,11 +45,11 @@ func NewTimelineHistoryRecord(timeline uint32, lsn uint64, comment string) *Time
 }
 
 func newHistoryRecordFromString(row string) (*TimelineHistoryRecord, error) {
-	matchResult := walHistoryRecordRegexp.FindStringSubmatch(row)
+	matchResult := timelineHistoryRecordRegexp.FindStringSubmatch(row)
 	if matchResult == nil || len(matchResult) < 4 {
 		return nil, nil
 	}
-	timeline, err := strconv.ParseUint(matchResult[1], 10, sizeofInt32)
+	timeline, err := strconv.ParseUint(matchResult[1], 10, sizeofInt32bits)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +109,8 @@ func parseHistoryFile(historyReader io.Reader) ([]*TimelineHistoryRecord, error)
 			return nil, err
 		}
 		if record == nil {
-			break
+			// skip any irrelevant rows (like comments)
+			continue
 		}
 		historyRecords = append(historyRecords, record)
 	}

@@ -15,6 +15,20 @@ import (
 	"github.com/wal-g/wal-g/utility"
 )
 
+type TestPostgresBackupObject struct {
+	storage.Object
+}
+
+func (o TestPostgresBackupObject) IsFullBackup() bool {
+	// this function is only valid for test cases,
+	// since arbitrary WAL file name may contain the "D" symbol
+	return !strings.Contains(o.GetName(), "D")
+}
+
+func (o TestPostgresBackupObject) GetBackupTime() time.Time {
+	return o.GetLastModified()
+}
+
 func TestFindTargetBeforeName_ReturnsBackup_Without_Modifier(t *testing.T) {
 	targetDelta := "base_000000010000000000000005_D_000000010000000000000003"
 	expected := targetDelta + utility.SentinelSuffix
@@ -22,10 +36,10 @@ func TestFindTargetBeforeName_ReturnsBackup_Without_Modifier(t *testing.T) {
 }
 
 func TestFindTargetBeforeName_ReturnsForbiddenActionError_With_FULL_Modifier(t *testing.T) {
-	controller := gomock.NewController(t)
-	defer controller.Finish()
-	_, err := internal.FindTargetBeforeName(mocks.NewMockFolder(controller), "",
-		internal.FullDeleteModifier, isFullBackup, greaterByName)
+	folder := createSimpleMockFolderWithoutBackups(t)
+	deleteHandler := newTestDeleteHandler(folder, lessByName)
+
+	_, err := deleteHandler.FindTargetBeforeName("", internal.FullDeleteModifier)
 	assert.Error(t, err)
 	assert.IsType(t, utility.ForbiddenActionError{}, err)
 }
@@ -38,7 +52,9 @@ func TestFindTargetBeforeName_ReturnsFullBackup_With_FIND_FULL(t *testing.T) {
 
 func testFindTargetBeforeName(t *testing.T, expected, targetName string, modifier int) {
 	folder := testtools.CreateMockStorageFolderWithDeltaBackups(t)
-	target, err := internal.FindTargetBeforeName(folder, targetName, modifier, isFullBackup, greaterByName)
+	deleteHandler := newTestDeleteHandler(folder, lessByName)
+	target, err := deleteHandler.FindTargetBeforeName(targetName, modifier)
+
 	assert.NoError(t, err)
 	assert.Equal(t, expected, target.GetName())
 }
@@ -60,8 +76,10 @@ func TestFindTargetRetain_With_FIND_FULL_Modifier(t *testing.T) {
 
 func testTargetRetain(t *testing.T, expectedName string, retentionCount, modifier int) {
 	mockFolder := createMockFolderWithTime(t, utility.TimeNowCrossPlatformLocal())
+	deleteHandler := newTestDeleteHandler(mockFolder, lessByTime)
 
-	target, err := internal.FindTargetRetain(mockFolder, retentionCount, modifier, isFullBackup, greaterByTime)
+	target, err := deleteHandler.FindTargetRetain(retentionCount, modifier)
+
 	assert.NoError(t, err)
 	assert.Equal(t, expectedName, target.GetName())
 }
@@ -144,16 +162,20 @@ func TestFindTargetRetainAfter_With_FIND_FULL_Modifier(t *testing.T) {
 func testTargetRetainAfterTime(t *testing.T, duration time.Duration, expectedName string, retentionCount, modifier int) {
 	baseTime := utility.TimeNowCrossPlatformLocal()
 	mockFolder := createMockFolderWithTime(t, baseTime)
+	deleteHandler := newTestDeleteHandler(mockFolder, lessByTime)
 
-	target, err := internal.FindTargetRetainAfterTime(mockFolder, retentionCount, baseTime.Add(duration), modifier, isFullBackup, greaterByTime)
+	target, err := deleteHandler.FindTargetRetainAfterTime(retentionCount, baseTime.Add(duration), modifier)
+
 	assert.NoError(t, err)
 	assert.Equal(t, expectedName, target.GetName())
 }
 
 func testTargetRetainAfterName(t *testing.T, name string, expectedName string, retentionCount, modifier int) {
 	mockFolder := createMockFolderWithTime(t, utility.TimeNowCrossPlatformLocal())
+	deleteHandler := newTestDeleteHandler(mockFolder, lessByTime)
 
-	target, err := internal.FindTargetRetainAfterName(mockFolder, retentionCount, name, modifier, isFullBackup, greaterByTime)
+	target, err := deleteHandler.FindTargetRetainAfterName(retentionCount, name, modifier)
+
 	assert.NoError(t, err)
 	assert.Equal(t, expectedName, target.GetName())
 }
@@ -181,9 +203,10 @@ func TestFindTargetBeforeTime_With_FIND_FULL_Modifier(t *testing.T) {
 func testFindTargetBeforeTime(t *testing.T, minute int, modifier int) (storage.Object, error) {
 	baseTime := utility.TimeNowCrossPlatformLocal()
 	mockFolder := createMockFolderWithTime(t, baseTime)
+	deleteHandler := newTestDeleteHandler(mockFolder, lessByTime)
 
 	timeLine := baseTime.Add(time.Duration(minute * int(time.Minute)))
-	return internal.FindTargetBeforeTime(mockFolder, timeLine, modifier, isFullBackup, lessByTime)
+	return deleteHandler.FindTargetBeforeTime(timeLine, modifier)
 }
 
 func verifyThatExistBackupsAndWals(t *testing.T, expectBackupExistAfterDelete, expectWalExistAfterDelete map[string]bool, folder storage.Folder) {
@@ -231,7 +254,12 @@ func TestDeleteBeforeTargetWithPermanentBackups(t *testing.T) {
 
 	// attempt delete
 	target := storage.NewLocalObject("", utility.TimeNowCrossPlatformLocal().Add(time.Duration(1*int(time.Minute))), 0)
-	err := internal.DeleteBeforeTarget(folder, target, true, isFullBackup, lessByTime)
+
+	permanentBackups, permanentWals := internal.GetPermanentObjects(folder)
+	isPermanent := makeTestPermanentFunc(permanentBackups, permanentWals)
+	deleteHandler := newTestDeleteHandler(folder, lessByTime, internal.IsPermanentFunc(isPermanent))
+
+	err := deleteHandler.DeleteBeforeTarget(TestPostgresBackupObject{target}, true)
 	assert.NoError(t, err)
 
 	// verify expected permanent still exists
@@ -276,18 +304,64 @@ func createMockFolderWithTime(t *testing.T, baseTime time.Time) *mocks.MockFolde
 	return mockFolder
 }
 
-func isFullBackup(object storage.Object) bool {
-	return !strings.Contains(object.GetName(), "D")
+func createSimpleMockFolderWithoutBackups(t *testing.T) *mocks.MockFolder {
+	controller := gomock.NewController(t)
+	defer controller.Finish()
+
+	objects := make([]storage.Object, 0)
+	mockBaseBackupFolder := mocks.NewMockFolder(controller)
+
+	mockBaseBackupFolder.
+		EXPECT().
+		ListFolder().
+		Return(objects, nil, nil).
+		AnyTimes()
+
+	mockFolder := mocks.NewMockFolder(controller)
+	mockFolder.
+		EXPECT().
+		GetSubFolder(utility.BaseBackupPath).
+		Return(mockBaseBackupFolder).
+		AnyTimes()
+
+	return mockFolder
 }
 
-func greaterByName(object1, object2 storage.Object) bool {
-	return object1.GetName() > object2.GetName()
+func lessByName(object1, object2 storage.Object) bool {
+	return object1.GetName() < object2.GetName()
 }
 
 func lessByTime(object1, object2 storage.Object) bool {
 	return object1.GetLastModified().Before(object2.GetLastModified())
 }
 
-func greaterByTime(object1, object2 storage.Object) bool {
-	return object1.GetLastModified().After(object2.GetLastModified())
+func newTestDeleteHandler(
+	folder storage.Folder,
+	lessFunc func(storage.Object, storage.Object) bool,
+	options ...internal.DeleteHandlerOption,
+) *internal.DeleteHandler {
+	objects, _ := getBackupObjects(folder)
+
+	testBackupObjects := make([]internal.BackupObject, 0, len(objects))
+	for _, object := range objects {
+		testBackupObjects = append(testBackupObjects, TestPostgresBackupObject{object})
+	}
+
+	return internal.NewDeleteHandler(folder, testBackupObjects, lessFunc, options...)
+}
+
+// this function is the analog for internal.GetBackupSentinelObjects
+// but we don't use sentinel suffixes in the above tests so there is no sentinel suffix check
+func getBackupObjects(folder storage.Folder) ([]storage.Object, error) {
+	objects, _, err := folder.GetSubFolder(utility.BaseBackupPath).ListFolder()
+	if err != nil {
+		return nil, err
+	}
+	return objects, nil
+}
+
+func makeTestPermanentFunc(permanentBackups, permanentWals map[string]bool) func(object storage.Object) bool {
+	return func(object storage.Object) bool {
+		return internal.IsPermanent(object.GetName(), permanentBackups, permanentWals)
+	}
 }

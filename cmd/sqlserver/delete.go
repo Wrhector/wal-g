@@ -1,6 +1,8 @@
 package sqlserver
 
 import (
+	"time"
+
 	"github.com/spf13/cobra"
 	"github.com/wal-g/storages/storage"
 	"github.com/wal-g/tracelog"
@@ -40,40 +42,62 @@ var deleteEverythingCmd = &cobra.Command{
 }
 
 func runDeleteEverything(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
+	deleteHandler, err := newSqlServerDeleteHandler()
 	tracelog.ErrorLogger.FatalOnError(err)
-	internal.DeleteEverything(folder, confirmed, args)
+
+	deleteHandler.DeleteEverything(confirmed)
 }
 
 func runDeleteBefore(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
+	deleteHandler, err := newSqlServerDeleteHandler()
 	tracelog.ErrorLogger.FatalOnError(err)
-	isFullBackup := func(object storage.Object) bool {
-		return IsFullBackup(folder, object)
-	}
-	internal.HandleDeleteBefore(folder, args, confirmed, isFullBackup, GetLessFunc(folder))
+
+	deleteHandler.HandleDeleteBefore(args, confirmed)
 }
 
 func runDeleteRetain(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
+	deleteHandler, err := newSqlServerDeleteHandler()
 	tracelog.ErrorLogger.FatalOnError(err)
-	isFullBackup := func(object storage.Object) bool {
-		return IsFullBackup(folder, object)
-	}
-	internal.HandleDeleteRetain(folder, args, confirmed, isFullBackup, GetLessFunc(folder))
+
+	deleteHandler.HandleDeleteRetain(args, confirmed)
 }
 
 func init() {
-	Cmd.AddCommand(deleteCmd)
+	cmd.AddCommand(deleteCmd)
 	deleteCmd.AddCommand(deleteBeforeCmd, deleteRetainCmd, deleteEverythingCmd)
 	deleteCmd.PersistentFlags().BoolVar(&confirmed, internal.ConfirmFlag, false, "Confirms backup deletion")
 }
 
-func IsFullBackup(folder storage.Folder, object storage.Object) bool {
+func newSqlServerDeleteHandler() (*internal.DeleteHandler, error) {
+	folder, err := internal.ConfigureFolder()
+	tracelog.ErrorLogger.FatalOnError(err)
+
+	backups, err := internal.GetBackupSentinelObjects(folder)
+	if err != nil {
+		return nil, err
+	}
+
+	backupObjects := make([]internal.BackupObject, 0, len(backups))
+	for _, object := range backups {
+		backupObjects = append(backupObjects, SqlServerBackupObject{object})
+	}
+
+	return internal.NewDeleteHandler(folder, backupObjects, makeLessFunc()), nil
+}
+
+type SqlServerBackupObject struct {
+	storage.Object
+}
+
+func (o SqlServerBackupObject) IsFullBackup() bool {
 	return true
 }
 
-func GetLessFunc(folder storage.Folder) func(object1, object2 storage.Object) bool {
+func (o SqlServerBackupObject) GetBackupTime() time.Time {
+	return o.Object.GetLastModified()
+}
+
+func makeLessFunc() func(object1, object2 storage.Object) bool {
 	return func(object1, object2 storage.Object) bool {
 		time1, ok1 := utility.TryFetchTimeRFC3999(object1.GetName())
 		time2, ok2 := utility.TryFetchTimeRFC3999(object2.GetName())

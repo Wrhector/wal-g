@@ -1,5 +1,6 @@
 # WAL-G
-[![Build Status](https://travis-ci.org/wal-g/wal-g.svg?branch=master)](https://travis-ci.org/wal-g/wal-g)
+![Docker-tests-status](https://github.com/wal-g/wal-g/workflows/Docker%20tests/badge.svg)
+![Unit-tests-status](https://github.com/wal-g/wal-g/workflows/Unit%20tests/badge.svg)
 [![Go Report Card](https://goreportcard.com/badge/github.com/wal-g/wal-g)](https://goreportcard.com/report/github.com/wal-g/wal-g)
 
 WAL-G is an archival restoration tool for Postgres(beta for MySQL, MariaDB, and MongoDB)
@@ -106,6 +107,14 @@ Controls the trimming of extra slashes in paths. The default is `true`. To allow
 * `GCS_ENCRYPTION_KEY`
 
 To configure GCS Customer Supplied Encryption Key (CSEK) for client-side encryption and decryption. By default, Google-managed keys are used. CSEK must be a 32-byte AES-256 key, encoded in standard Base64.
+
+* `GCS_MAX_CHUNK_SIZE` (e.g. `16777216`)
+
+Overrides the default `maximum chunk size` of 52428800 bytes (50 MiB). The size of the chunk must be specified in bytes. This parameter could be useful for different types of uploading (e.g. `16777216` (16MiB) would be perfect for `wal-push`, `52428800` (50MiB) is suitable for `backup-push`).
+
+* `GCS_MAX_RETRIES` (e.g. `1`)
+
+Overrides the default upload and download retry limit while interacting with GCS.  Default: 16.
 
 * `WALG_AZURE_BUFFER_SIZE` (e.g. `33554432`)
 

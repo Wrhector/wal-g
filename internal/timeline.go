@@ -2,12 +2,20 @@ package internal
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 
 	"github.com/jackc/pgx"
 	"github.com/pkg/errors"
 	"github.com/wal-g/tracelog"
+	"github.com/wal-g/wal-g/utility"
 )
+
+const PatternTimelineAndLogSegNo = "[0-9A-F]{24}"
+
+var regexpTimelineAndLogSegNo = regexp.MustCompile(PatternTimelineAndLogSegNo)
+
+const maxCountOfLSN = 2
 
 type BytesPerWalSegmentError struct {
 	error
@@ -33,6 +41,18 @@ func (err IncorrectLogSegNoError) Error() string {
 	return fmt.Sprintf(tracelog.GetErrorFormatter(), err.error)
 }
 
+type IncorrectBackupNameError struct {
+	error
+}
+
+func newIncorrectBackupNameError(name string) IncorrectBackupNameError {
+	return IncorrectBackupNameError{errors.Errorf("Incorrect backup name: %s", name)}
+}
+
+func (err IncorrectBackupNameError) Error() string {
+	return fmt.Sprintf(tracelog.GetErrorFormatter(), err.error)
+}
+
 func readTimeline(conn *pgx.Conn) (timeline uint32, err error) {
 	var bytesPerWalSegment uint32
 
@@ -53,7 +73,14 @@ var (
 	// WalSegmentSize is the size of one WAL file
 	WalSegmentSize        = uint64(16 * 1024 * 1024)
 	xLogSegmentsPerXLogId = 0x100000000 / WalSegmentSize // xlog_internal.h line 101
+	// .history file name regexp. For more details, see
+	// https://doxygen.postgresql.org/backend_2access_2transam_2timeline_8c_source.html
+	timelineHistoryFileRegexp *regexp.Regexp
 )
+
+func init() {
+	timelineHistoryFileRegexp = regexp.MustCompile("^([0-9a-fA-F]+)\\.history(\\.\\w+)?$")
+}
 
 const (
 	walFileFormat        = "%08X%08X%08X" // xlog_internal.h line 155
@@ -112,9 +139,38 @@ func ParseWALFilename(name string) (timelineID uint32, logSegNo uint64, err erro
 	return
 }
 
+func TryFetchTimelineAndLogSegNo(objectName string) (uint32, uint64, bool) {
+	foundLsn := regexpTimelineAndLogSegNo.FindAllString(objectName, maxCountOfLSN)
+	if len(foundLsn) > 0 {
+		timelineId, logSegNo, err := ParseWALFilename(foundLsn[0])
+
+		if err != nil {
+			return 0, 0, false
+		}
+		return timelineId, logSegNo, true
+	}
+	return 0, 0, false
+}
+
 func isWalFilename(filename string) bool {
 	_, _, err := ParseWALFilename(filename)
 	return err == nil
+}
+
+func ParseTimelineFromBackupName(backupName string) (uint32, error) {
+	if len(backupName) == 0 {
+		return 0, newIncorrectBackupNameError(backupName)
+	}
+	prefixLength := len(utility.BackupNamePrefix)
+	return ParseTimelineFromString(backupName[prefixLength : prefixLength+8])
+}
+
+func ParseTimelineFromString(timelineString string) (uint32, error) {
+	timelineId64, err := strconv.ParseUint(timelineString, hexadecimal, sizeofInt32bits)
+	if err != nil {
+		return 0, err
+	}
+	return uint32(timelineId64), nil
 }
 
 // GetNextWalFilename computes name of next WAL segment
